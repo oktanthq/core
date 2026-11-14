@@ -1,7 +1,7 @@
 FROM golang:1.26.3 AS build
 
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/core ./cmd/core
 

@@ -8,11 +8,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/oktanthq/core/internal/auth"
 	"github.com/oktanthq/core/internal/config"
+	"github.com/oktanthq/core/internal/githubapp"
 	"github.com/oktanthq/core/internal/httpapi"
+	"github.com/oktanthq/core/internal/platform"
 	"github.com/oktanthq/core/internal/project"
 )
 
@@ -29,11 +34,55 @@ func main() {
 	logger := newLogger(os.Stderr, cfg.LogLevel)
 	slog.SetDefault(logger)
 
-	api := httpapi.New(httpapi.Options{
-		Logger:   logger,
-		Version:  version,
-		Projects: project.NewMemoryStore(),
-	})
+	opts := httpapi.Options{
+		Logger:       logger,
+		Version:      version,
+		Projects:     project.NewMemoryStore(),
+		GitHubWebURL: cfg.GitHubWebURL,
+		AppOrigin:    cfg.AppOrigin,
+		StateSecret:  cfg.StateSecret,
+	}
+
+	if cfg.SupabaseJWTSecret != "" {
+		verifier, err := auth.NewVerifier(auth.Options{
+			JWTSecret: cfg.SupabaseJWTSecret,
+			Issuer:    auth.IssuerFromURL(cfg.SupabaseURL),
+		})
+		if err != nil {
+			logger.Error("auth", "err", err)
+			os.Exit(1)
+		}
+		opts.Verifier = verifier
+	}
+
+	if cfg.DatabaseURL != "" {
+		pool, err := pgxpool.New(context.Background(), cfg.DatabaseURL)
+		if err != nil {
+			logger.Error("database", "err", err)
+			os.Exit(1)
+		}
+		defer pool.Close()
+		store := platform.NewPostgres(pool)
+		opts.Platform = store
+		opts.ReadyCheck = store.Ping
+	}
+
+	if cfg.GitHubAppID != "" && cfg.GitHubAppPrivateKey != "" {
+		gh, err := githubapp.New(githubapp.Options{
+			AppID:      cfg.GitHubAppID,
+			PrivateKey: cfg.GitHubAppPrivateKey,
+			APIURL:     cfg.GitHubAPIURL,
+			WebURL:     cfg.GitHubWebURL,
+			Slug:       cfg.GitHubAppSlug,
+		})
+		if err != nil {
+			logger.Error("github app", "err", err)
+			os.Exit(1)
+		}
+		opts.GitHub = gh
+	}
+
+	api := httpapi.New(opts)
 
 	server := &http.Server{
 		Addr:              cfg.Addr,
@@ -82,5 +131,19 @@ func newLogger(out *os.File, level string) *slog.Logger {
 	default:
 		slogLevel = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{Level: slogLevel}))
+	return slog.New(slog.NewJSONHandler(out, &slog.HandlerOptions{
+		Level:       slogLevel,
+		ReplaceAttr: redactAttr,
+	}))
+}
+
+func redactAttr(_ []string, a slog.Attr) slog.Attr {
+	key := strings.ToLower(a.Key)
+	switch {
+	case key == "token", key == "authorization", key == "secret",
+		strings.Contains(key, "private_key"), strings.Contains(key, "access_token"):
+		return slog.String(a.Key, "[redacted]")
+	default:
+		return a
+	}
 }

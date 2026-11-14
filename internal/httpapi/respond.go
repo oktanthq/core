@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
+	"github.com/oktanthq/core/internal/platform"
 	"github.com/oktanthq/core/internal/project"
 )
 
@@ -36,8 +38,21 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 func writeStoreError(w http.ResponseWriter, logger *slog.Logger, err error) {
+	var plat *platform.Error
 	var client *project.Error
 	switch {
+	case errors.As(err, &plat) && errors.Is(err, platform.ErrInvalid):
+		writeError(w, http.StatusBadRequest, "invalid_request", plat.Message)
+	case errors.As(err, &plat) && errors.Is(err, platform.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", plat.Message)
+	case errors.As(err, &plat) && errors.Is(err, platform.ErrForbidden):
+		writeError(w, http.StatusForbidden, "forbidden", plat.Message)
+	case errors.Is(err, platform.ErrNotFound):
+		message := "not found"
+		if errors.As(err, &plat) && plat.Message != "" {
+			message = plat.Message
+		}
+		writeError(w, http.StatusNotFound, "not_found", message)
 	case errors.As(err, &client) && errors.Is(err, project.ErrInvalid):
 		writeError(w, http.StatusBadRequest, "invalid_request", client.Message)
 	case errors.As(err, &client) && errors.Is(err, project.ErrConflict):
@@ -49,7 +64,12 @@ func writeStoreError(w http.ResponseWriter, logger *slog.Logger, err error) {
 		}
 		writeError(w, http.StatusNotFound, "not_found", message)
 	default:
-		logger.Error("project store", "err", err)
+		logger.Error("store", "err", err)
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 	}
+}
+
+func validUUID(id string) bool {
+	_, err := uuid.Parse(id)
+	return err == nil
 }

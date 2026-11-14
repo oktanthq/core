@@ -5,7 +5,11 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/oktanthq/core/internal/auth"
+	"github.com/oktanthq/core/internal/githubapp"
+	"github.com/oktanthq/core/internal/platform"
 	"github.com/oktanthq/core/internal/project"
 )
 
@@ -15,21 +19,41 @@ import (
 // database or other dependency is down.
 type ReadyCheck func(ctx context.Context) error
 
+type gitHubAPI interface {
+	InstallURL(state string) string
+	CreateInstallationToken(installationID int64, repoFullName string) (githubapp.Access, error)
+	ResolveCommit(token, repoFullName, ref string) (string, error)
+}
+
 // Options configures the HTTP handler.
 type Options struct {
-	Logger     *slog.Logger
-	Version    string
-	Projects   project.Store
-	ReadyCheck ReadyCheck
+	Logger       *slog.Logger
+	Version      string
+	Projects     project.Store
+	Platform     platform.Store
+	Verifier     *auth.Verifier
+	GitHub       gitHubAPI
+	GitHubWebURL string
+	AppOrigin    string
+	StateSecret  string
+	ReadyCheck   ReadyCheck
+	Now          func() time.Time
 }
 
 // Server serves the core API.
 type Server struct {
-	logger     *slog.Logger
-	version    string
-	projects   project.Store
-	readyCheck ReadyCheck
-	handler    http.Handler
+	logger       *slog.Logger
+	version      string
+	projects     project.Store
+	platform     platform.Store
+	verifier     *auth.Verifier
+	github       gitHubAPI
+	githubWebURL string
+	appOrigin    string
+	stateSecret  string
+	readyCheck   ReadyCheck
+	now          func() time.Time
+	handler      http.Handler
 }
 
 // New builds the API handler.
@@ -48,12 +72,23 @@ func New(opts Options) *Server {
 	if version == "" {
 		version = "dev"
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 
 	s := &Server{
-		logger:     logger,
-		version:    version,
-		projects:   opts.Projects,
-		readyCheck: opts.ReadyCheck,
+		logger:       logger,
+		version:      version,
+		projects:     opts.Projects,
+		platform:     opts.Platform,
+		verifier:     opts.Verifier,
+		github:       opts.GitHub,
+		githubWebURL: opts.GitHubWebURL,
+		appOrigin:    opts.AppOrigin,
+		stateSecret:  opts.StateSecret,
+		readyCheck:   opts.ReadyCheck,
+		now:          now,
 	}
 
 	mux := http.NewServeMux()
@@ -65,6 +100,11 @@ func New(opts Options) *Server {
 	mux.HandleFunc("GET /v1/projects/{id}", s.getProject)
 	mux.HandleFunc("PATCH /v1/projects/{id}", s.updateProject)
 	mux.HandleFunc("DELETE /v1/projects/{id}", s.deleteProject)
+
+	mux.Handle("POST /v1/orgs/{orgId}/integrations/github/connect", s.requireAuth(http.HandlerFunc(s.connectGitHub)))
+	mux.HandleFunc("GET /v1/integrations/github/callback", s.githubCallback)
+	mux.Handle("POST /v1/orgs/{orgId}/projects", s.requireAuth(http.HandlerFunc(s.createOrgProject)))
+	mux.Handle("POST /v1/projects/{id}/analyses", s.requireAuth(http.HandlerFunc(s.createAnalysis)))
 
 	s.handler = withRequestID(logger, withAccessLog(logger, withRecover(logger, mux)))
 	return s
