@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/oktanthq/core/internal/auth"
 	"github.com/oktanthq/core/internal/githubapp"
 	"github.com/oktanthq/core/internal/platform"
@@ -167,6 +168,36 @@ func TestCreateOrgProjectAndAnalysis(t *testing.T) {
 	}
 	if envMsg.Payload.InstallationID != 123456 || envMsg.Payload.Trigger != "manual" {
 		t.Fatalf("payload = %+v", envMsg.Payload)
+	}
+	if envMsg.Version != 1 || envMsg.OrgID != orgID || envMsg.Payload.OrgID != orgID {
+		t.Fatalf("envelope ids = %+v", envMsg)
+	}
+	if _, err := uuid.Parse(envMsg.EventID); err != nil {
+		t.Fatalf("event_id: %v", err)
+	}
+	if _, err := uuid.Parse(envMsg.CorrelationID); err != nil {
+		t.Fatalf("correlation_id: %v", err)
+	}
+	if envMsg.ActorUserID != userID {
+		t.Fatalf("actor_user_id = %q", envMsg.ActorUserID)
+	}
+	if got := envMsg.Payload.RequestedAnalyzers; len(got) != 3 || got[0] != "sast" || got[1] != "secrets" || got[2] != "dependencies" {
+		t.Fatalf("requested_analyzers = %v", got)
+	}
+	if envMsg.Payload.Access.Kind != "installation_token" || envMsg.Payload.Provider != "github" {
+		t.Fatalf("access/provider = %+v", envMsg.Payload)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(messages[0], &raw); err != nil {
+		t.Fatalf("raw: %v", err)
+	}
+	if raw["version"] != float64(1) {
+		t.Fatalf("version JSON type = %T %v", raw["version"], raw["version"])
+	}
+	payload, _ := raw["payload"].(map[string]any)
+	if _, ok := payload["installation_id"].(float64); !ok {
+		t.Fatalf("installation_id JSON type = %T", payload["installation_id"])
 	}
 
 	rec = authedJSON(t, handler, http.MethodPost, "/v1/projects/"+created.ID+"/analyses", `{"analysis_type":"security"}`)

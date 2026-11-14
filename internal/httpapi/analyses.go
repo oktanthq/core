@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/google/uuid"
 	"github.com/oktanthq/core/internal/auth"
@@ -122,6 +123,10 @@ func (s *Server) enqueueAnalysis(r *http.Request, actorUserID string, project pl
 		}
 		commitSHA = sha
 	}
+	commitSHA = strings.ToLower(strings.TrimSpace(commitSHA))
+	if !validCommitSHA(commitSHA) {
+		return platform.AnalysisRun{}, &platform.Error{Sentinel: platform.ErrInvalid, Message: "commit_sha must be a git commit SHA"}
+	}
 
 	if existing, err := s.platform.ActiveAnalysis(r.Context(), repo.ID, commitSHA, analysisType); err == nil {
 		return existing, platform.ErrConflict
@@ -136,6 +141,10 @@ func (s *Server) enqueueAnalysis(r *http.Request, actorUserID string, project pl
 	if cloneURL == "" {
 		cloneURL = githubapp.CloneURL(s.githubWebURL, repo.FullName)
 	}
+	defaultBranch := repo.DefaultBranch
+	if defaultBranch == "" {
+		defaultBranch = ref
+	}
 	payload := queue.AnalysisPayload{
 		AnalysisRunID:      runID,
 		OrgID:              project.OrganizationID,
@@ -144,7 +153,7 @@ func (s *Server) enqueueAnalysis(r *http.Request, actorUserID string, project pl
 		Provider:           "github",
 		RepoFullName:       repo.FullName,
 		CloneURL:           cloneURL,
-		DefaultBranch:      repo.DefaultBranch,
+		DefaultBranch:      defaultBranch,
 		CommitSHA:          commitSHA,
 		Ref:                "refs/heads/" + ref,
 		Trigger:            trigger,
@@ -154,10 +163,10 @@ func (s *Server) enqueueAnalysis(r *http.Request, actorUserID string, project pl
 		Access: queue.Access{
 			Kind:      "installation_token",
 			Token:     access.Token,
-			ExpiresAt: access.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"),
+			ExpiresAt: queue.FormatTime(access.ExpiresAt),
 		},
 	}
-	env := queue.NewAnalysisRequested(eventID, s.now(), actorUserID, RequestID(r.Context()), payload)
+	env := queue.NewAnalysisRequested(eventID, s.now(), uuidOrEmpty(actorUserID), correlationID(r), payload)
 	raw, err := queue.MarshalJSONBytes(env)
 	if err != nil {
 		return platform.AnalysisRun{}, err
@@ -177,4 +186,34 @@ func (s *Server) enqueueAnalysis(r *http.Request, actorUserID string, project pl
 		return run, err
 	}
 	return run, nil
+}
+
+func correlationID(r *http.Request) string {
+	id := RequestID(r.Context())
+	if _, err := uuid.Parse(id); err == nil {
+		return id
+	}
+	return uuid.NewString()
+}
+
+func uuidOrEmpty(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if _, err := uuid.Parse(raw); err != nil {
+		return ""
+	}
+	return raw
+}
+
+func validCommitSHA(sha string) bool {
+	n := len(sha)
+	if n < 7 || n > 40 {
+		return false
+	}
+	for _, r := range sha {
+		if unicode.Is(unicode.ASCII_Hex_Digit, r) {
+			continue
+		}
+		return false
+	}
+	return true
 }

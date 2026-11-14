@@ -15,6 +15,9 @@ const (
 	EnvelopeVersion = 1
 )
 
+// Phase1Analyzers is the requested_analyzers list Codehound expects in Phase 1.
+var Phase1Analyzers = []string{"sast", "secrets", "dependencies"}
+
 // Access is the short-lived credential Codehound uses to clone.
 // Never log this struct.
 type Access struct {
@@ -43,6 +46,8 @@ type AnalysisPayload struct {
 }
 
 // Envelope is the event wrapper from the platform event contract.
+// correlation_id is required by Codehound and must be a UUID.
+// actor_user_id is optional.
 type Envelope struct {
 	EventID       string          `json:"event_id"`
 	Type          string          `json:"type"`
@@ -51,31 +56,31 @@ type Envelope struct {
 	OrgID         string          `json:"org_id"`
 	ProjectID     string          `json:"project_id"`
 	ActorUserID   string          `json:"actor_user_id,omitempty"`
-	CorrelationID string          `json:"correlation_id,omitempty"`
+	CorrelationID string          `json:"correlation_id"`
 	Payload       AnalysisPayload `json:"payload"`
 }
 
-// RequestedAnalyzers returns the Phase 1 scanner set for an analysis type.
-func RequestedAnalyzers(analysisType string) []string {
-	switch analysisType {
-	case "security":
-		return []string{"sast", "secrets", "dependencies"}
-	case "quality":
-		return []string{"quality"}
-	case "full":
-		return []string{"sast", "secrets", "dependencies", "quality"}
-	default:
-		return nil
-	}
+// RequestedAnalyzers returns the Phase 1 scanner set.
+// Codehound runs createDefaultSecurityPipeline regardless of analysis_type.
+func RequestedAnalyzers(_ string) []string {
+	return append([]string(nil), Phase1Analyzers...)
+}
+
+// FormatTime is the ISO-8601 UTC timestamp Codehound parses.
+func FormatTime(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
 // NewAnalysisRequested builds a version-1 analysis.requested envelope.
 func NewAnalysisRequested(eventID string, occurredAt time.Time, actorUserID, correlationID string, payload AnalysisPayload) Envelope {
+	if len(payload.RequestedAnalyzers) == 0 {
+		payload.RequestedAnalyzers = RequestedAnalyzers(payload.AnalysisType)
+	}
 	return Envelope{
 		EventID:       eventID,
 		Type:          TypeAnalysisRequested,
 		Version:       EnvelopeVersion,
-		OccurredAt:    occurredAt.UTC().Format(time.RFC3339),
+		OccurredAt:    FormatTime(occurredAt),
 		OrgID:         payload.OrgID,
 		ProjectID:     payload.ProjectID,
 		ActorUserID:   actorUserID,
